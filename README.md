@@ -57,5 +57,18 @@ The ledger picture is drawn with Pillow using DejaVu Sans (Latin) and Droid Sans
 Korean) from `/usr/share/fonts`; see the paths at the top of `ledger_image.py`. Emoji in names are left out of the
 picture (no emoji font), but they still show in the text receipts.
 
-## Develop
-`.venv/bin/python -m pytest` (the bot tests run against a fake Telegram API).
+## Running the tests
+The tests need no bot token and no network: the bot tests run the real handlers against a fake Telegram API.
+Developed and tested on Python 3.14.
+
+```
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt pytest
+.venv/bin/python -m pytest
+```
+
+The ledger picture tests draw real images, so they need the fonts the picture uses (see "Fonts"). On Debian or
+Ubuntu: `sudo apt install fonts-dejavu-core fonts-droid-fallback`.
+
+## License
+[MIT](LICENSE).
