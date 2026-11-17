@@ -1,0 +1,14 @@
+# secrets and real data: never commit these
+.env
+*.env
+ledger.db
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# environment and caches
+.venv/
+__pycache__/
+.pytest_cache/
+.DS_Store

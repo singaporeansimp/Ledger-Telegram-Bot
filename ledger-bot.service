@@ -1,0 +1,13 @@
+[Unit]
+Description=Telegram group ledger bot
+After=network-online.target
+
+[Service]
+WorkingDirectory=/root/TelegramBotLedger
+EnvironmentFile=/root/TelegramBotLedger/.env
+ExecStart=/root/TelegramBotLedger/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

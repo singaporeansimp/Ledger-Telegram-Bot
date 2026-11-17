@@ -1,0 +1,82 @@
+[
+ {
+  "label": "scoop",
+  "html": "🏁 <b>Flip #42 — Player 11 scoops all three boards</b>\nThe scoop pays 3x the wager: $150 from each other player.\n\n<b>Settle up</b>\nPlayer 12 owes Player 11 $150\nPlayer 13 owes Player 11 $150\n\n<b>Players</b>\n1. Player 11 — 3 points · +$300\n2. Player 12 — 0 points · -$150\n3. Player 13 — 0 points · -$150\n\n<b>Boards</b>\nBoard 1: Player 11 — straight, five high\nBoard 2: Player 11 — straight, ace high\nHand strength: Player 11 — straight, five high\n\n$50 a head · pot $150\n5 private cards each · up to 2 extra cards each · scoop pays 3x the wager\nDeck seed <code>000000000000000000000000000000000000000000000000000000000000000f</code>\nCheck it with <code>/verify 42</code>",
+  "text": "🏁 Flip #42 — Player 11 scoops all three boards\nThe scoop pays 3x the wager: $150 from each other player.\n\nSettle up\nPlayer 12 owes Player 11 $150\nPlayer 13 owes Player 11 $150\n\nPlayers\n1. Player 11 — 3 points · +$300\n2. Player 12 — 0 points · -$150\n3. Player 13 — 0 points · -$150\n\nBoards\nBoard 1: Player 11 — straight, five high\nBoard 2: Player 11 — straight, ace high\nHand strength: Player 11 — straight, five high\n\n$50 a head · pot $150\n5 private cards each · up to 2 extra cards each · scoop pays 3x the wager\nDeck seed 000000000000000000000000000000000000000000000000000000000000000f\nCheck it with /verify 42",
+  "flip_number": 42,
+  "nets": [
+   [
+    "Player 11",
+    300
+   ],
+   [
+    "Player 12",
+    -150
+   ],
+   [
+    "Player 13",
+    -150
+   ]
+  ]
+ },
+ {
+  "label": "chop",
+  "html": "🏁 <b>Flip #42 — Player 11 and Player 12 win</b>\n\n<b>Settle up</b>\nPlayer 13 owes Player 11 $25\nPlayer 13 owes Player 12 $25\n\n<b>Players</b>\n1. Player 11 — 3/2 points · +$25\n2. Player 12 — 3/2 points · +$25\n3. Player 13 — 0 points · -$50\n\n<b>Boards</b>\nBoard 1: Player 11 — flush, ace high\nBoard 2: Player 11 and Player 12 — straight, nine high, 1/2 each\nHand strength: Player 12 — flush, ace high\n\n$50 a head · pot $150\n5 private cards each · up to 2 extra cards each · scoop pays 3x the wager\nDeck seed <code>0000000000000000000000000000000000000000000000000000000000000002</code>\nCheck it with <code>/verify 42</code>",
+  "text": "🏁 Flip #42 — Player 11 and Player 12 win\n\nSettle up\nPlayer 13 owes Player 11 $25\nPlayer 13 owes Player 12 $25\n\nPlayers\n1. Player 11 — 3/2 points · +$25\n2. Player 12 — 3/2 points · +$25\n3. Player 13 — 0 points · -$50\n\nBoards\nBoard 1: Player 11 — flush, ace high\nBoard 2: Player 11 and Player 12 — straight, nine high, 1/2 each\nHand strength: Player 12 — flush, ace high\n\n$50 a head · pot $150\n5 private cards each · up to 2 extra cards each · scoop pays 3x the wager\nDeck seed 0000000000000000000000000000000000000000000000000000000000000002\nCheck it with /verify 42",
+  "flip_number": 42,
+  "nets": [
+   [
+    "Player 11",
+    25
+   ],
+   [
+    "Player 12",
+    25
+   ],
+   [
+    "Player 13",
+    -50
+   ]
+  ]
+ },
+ {
+  "label": "tied",
+  "html": "🏁 <b>Flip #42 — everyone tied</b>\n\n<b>Settle up</b>\nThe pot goes back and nobody owes anything.\n\n<b>Players</b>\n1. Player 11 — 1 point · $0\n2. Player 12 — 1 point · $0\n3. Player 13 — 1 point · $0\n\n<b>Boards</b>\nBoard 1: Player 13 — straight, six high\nBoard 2: Player 12 — flush, king high\nHand strength: Player 11 — three of a kind, fours\n\n$50 a head · pot $150\n5 private cards each · up to 2 extra cards each · scoop pays 3x the wager\nDeck seed <code>0000000000000000000000000000000000000000000000000000000000000008</code>\nCheck it with <code>/verify 42</code>",
+  "text": "🏁 Flip #42 — everyone tied\n\nSettle up\nThe pot goes back and nobody owes anything.\n\nPlayers\n1. Player 11 — 1 point · $0\n2. Player 12 — 1 point · $0\n3. Player 13 — 1 point · $0\n\nBoards\nBoard 1: Player 13 — straight, six high\nBoard 2: Player 12 — flush, king high\nHand strength: Player 11 — three of a kind, fours\n\n$50 a head · pot $150\n5 private cards each · up to 2 extra cards each · scoop pays 3x the wager\nDeck seed 0000000000000000000000000000000000000000000000000000000000000008\nCheck it with /verify 42",
+  "flip_number": 42,
+  "nets": [
+   [
+    "Player 11",
+    0
+   ],
+   [
+    "Player 12",
+    0
+   ],
+   [
+    "Player 13",
+    0
+   ]
+  ]
+ },
+ {
+  "label": "tricky name",
+  "html": "🏁 <b>Flip #42 — Dr. Mo — the · Great $1,000 &amp; &lt;… scoops all three boards</b>\nThe scoop pays 3x the wager: $150 from each other player.\n\n<b>Settle up</b>\nDr. Mo — the · Great $1,000 &amp; &lt;… owes Dr. Mo — the · Great $1,000 &amp; &lt;… $150\nDr. Mo — the · Great $1,000 &amp; &lt;… owes Dr. Mo — the · Great $1,000 &amp; &lt;… $150\n\n<b>Players</b>\n1. Dr. Mo — the · Great $1,000 &amp; &lt;… — 3 points · +$300\n2. Dr. Mo — the · Great $1,000 &amp; &lt;… — 0 points · -$150\n3. Dr. Mo — the · Great $1,000 &amp; &lt;… — 0 points · -$150\n\n<b>Boards</b>\nBoard 1: Dr. Mo — the · Great $1,000 &amp; &lt;… — straight, five high\nBoard 2: Dr. Mo — the · Great $1,000 &amp; &lt;… — straight, ace high\nHand strength: Dr. Mo — the · Great $1,000 &amp; &lt;… — straight, five high\n\n$50 a head · pot $150\n5 private cards each · up to 2 extra cards each · scoop pays 3x the wager\nDeck seed <code>000000000000000000000000000000000000000000000000000000000000000f</code>\nCheck it with <code>/verify 42</code>",
+  "text": "🏁 Flip #42 — Dr. Mo — the · Great $1,000 & <… scoops all three boards\nThe scoop pays 3x the wager: $150 from each other player.\n\nSettle up\nDr. Mo — the · Great $1,000 & <… owes Dr. Mo — the · Great $1,000 & <… $150\nDr. Mo — the · Great $1,000 & <… owes Dr. Mo — the · Great $1,000 & <… $150\n\nPlayers\n1. Dr. Mo — the · Great $1,000 & <… — 3 points · +$300\n2. Dr. Mo — the · Great $1,000 & <… — 0 points · -$150\n3. Dr. Mo — the · Great $1,000 & <… — 0 points · -$150\n\nBoards\nBoard 1: Dr. Mo — the · Great $1,000 & <… — straight, five high\nBoard 2: Dr. Mo — the · Great $1,000 & <… — straight, ace high\nHand strength: Dr. Mo — the · Great $1,000 & <… — straight, five high\n\n$50 a head · pot $150\n5 private cards each · up to 2 extra cards each · scoop pays 3x the wager\nDeck seed 000000000000000000000000000000000000000000000000000000000000000f\nCheck it with /verify 42",
+  "flip_number": 42,
+  "nets": [
+   [
+    "Dr. Mo — the · Great $1,000 & <b>Co</b>",
+    300
+   ],
+   [
+    "Dr. Mo — the · Great $1,000 & <b>Co</b>",
+    -150
+   ],
+   [
+    "Dr. Mo — the · Great $1,000 & <b>Co</b>",
+    -150
+   ]
+  ]
+ }
+]
