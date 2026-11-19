@@ -21,7 +21,7 @@ import profit_chart
 import render
 from money import format_cents as fmt
 from money import parse_cents
-from store import MAX_NAME, LedgerError, Store, clean_note
+from store import MAX_NAME, MAX_PURGE, LedgerError, Store, clean_note
 
 log = logging.getLogger("ledger")
 HTML = ParseMode.HTML
@@ -993,6 +993,98 @@ async def on_esg_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await esg_advance(context, p)
 
 
+# --- /purge: the owner's way to delete entries -----------------------------------------------------------------------
+
+@dataclass
+class PurgePending:
+    id: str
+    chat_id: int
+    seqs: list[int]
+    msg_id: int = 0
+
+
+def is_owner(context, user) -> bool:
+    """Only the configured Telegram user id. A username is not enough: those can be changed or reclaimed."""
+    owner = context.application.bot_data.get("owner_id")
+    return owner is not None and user is not None and user.id == owner
+
+
+def parse_entry_numbers(text: str) -> list[int] | None:
+    """'81 82', '#81, #82' -> [81, 82]; None if anything isn't an entry number."""
+    words = [w for w in re.split(r"[,\s]+", text.strip()) if w]
+    if not words or not all(re.fullmatch(r"#?\d{1,9}", w) for w in words):
+        return None
+    return list(dict.fromkeys(int(w.lstrip("#")) for w in words))
+
+
+async def cmd_purge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/purge 81 82: show what deleting those entries would do, and delete them if the owner confirms.
+
+    Anyone else is ignored without a word, so the command isn't advertised; it isn't in /help or the menu either."""
+    msg, chat, s = update.effective_message, update.effective_chat.id, store_of(context)
+    if not is_owner(context, update.effective_user):
+        return
+    seqs = parse_entry_numbers(args_of(msg))
+    if seqs is None or len(seqs) > MAX_PURGE:
+        await msg.reply_text(f"Usage: /purge 81 82 (up to {MAX_PURGE} entry numbers, see /history).")
+        return
+    try:
+        plan = s.purge_plan(chat, seqs)
+    except LedgerError as err:
+        await msg.reply_text(str(err))
+        return
+    names = {m.id: m.name for m in s.members(chat)}
+    effect = ", ".join(f"{escape(names[m])} {fmt(c, signed=True)}" for m, c in
+                       sorted(plan.effect.items(), key=lambda kv: (-kv[1], names[kv[0]].lower()))) or "none"
+    text = (f"🗑 <b>Permanently delete {len(plan.entries)} {'entry' if len(plan.entries) == 1 else 'entries'}?</b>\n\n"
+            + "\n\n".join(render.entry_text(e, names) for e in plan.entries)
+            + f"\n\n<b>Change to balances:</b> {effect}"
+            + (f"\nESG flip{'s' if len(plan.esg_flips) > 1 else ''} #{', #'.join(map(str, plan.esg_flips))} will stop "
+               "counting as recorded." if plan.esg_flips else "")
+            + ("\nOn their own the entries you named would leave their undo behind, so those are included."
+               if len(plan.entries) > len(seqs) else "")
+            + "\n\nA backup is taken first. This cannot be undone from the bot.")
+    pending = PurgePending(secrets.token_hex(3), chat, [e.seq for e in plan.entries])
+    markup = InlineKeyboardMarkup([[button("🗑 Delete", f"x:{pending.id}:ok"), button("✖ Cancel", f"x:{pending.id}:x")]])
+    pending.msg_id = (await msg.reply_html(text, reply_markup=markup)).message_id
+    purges_of(context)[pending.id] = pending
+
+
+def purges_of(context) -> dict[str, PurgePending]:
+    return context.application.bot_data.setdefault("purges", {})
+
+
+async def on_purge_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_owner(context, query.from_user):
+        await query.answer("Only the owner can do that.", show_alert=True)
+        return
+    _, purge_id, choice = query.data.split(":")
+    pending, s = purges_of(context).pop(purge_id, None), store_of(context)
+    if pending is None:
+        await query.answer("That purge has expired. Send /purge again.", show_alert=True)
+        return
+    chat, msg_id = pending.chat_id, pending.msg_id
+    if choice == "x":
+        await edit(context.bot, chat, msg_id, "✖ Purge cancelled. Nothing was deleted.")
+        await query.answer()
+        return
+    try:
+        backup = s.backup()
+        plan = s.purge(chat, pending.seqs)
+    except (LedgerError, OSError) as err:
+        await edit(context.bot, chat, msg_id, f"⚠️ Nothing was deleted: {escape(str(err))}")
+        await query.answer()
+        return
+    log.warning("PURGE by user %s in chat %s: entries %s removed; backup at %s", query.from_user.id, chat,
+                [e.seq for e in plan.entries], backup)
+    numbers = ", ".join(f"#{e.seq}" for e in plan.entries)
+    await edit(context.bot, chat, msg_id, f"🗑 Deleted {numbers}. The ledger still adds up to zero.\n"
+                                          f"A backup was kept before deleting.")
+    await query.answer()
+    await refresh_pinned(context, chat)
+
+
 # --- wiring --------------------------------------------------------------------------------------------------------
 
 async def on_error(update, context) -> None:
@@ -1007,19 +1099,21 @@ async def publish_commands(app: Application) -> None:
         log.warning("Could not publish the command menu", exc_info=True)
 
 
-def build_app(token: str, db_path: str, esg_db_path: str | None = None) -> Application:
+def build_app(token: str, db_path: str, esg_db_path: str | None = None, owner_id: int | None = None) -> Application:
     app = (Application.builder().token(token).post_init(publish_commands)
            .connect_timeout(10).read_timeout(30).write_timeout(30).pool_timeout(10).build())
     app.bot_data["store"] = Store(db_path)
     app.bot_data["esg_db"] = esg_db_path
+    app.bot_data["owner_id"] = owner_id  # the one Telegram user id allowed to /purge; None switches it off
     for names, handler in [(["help"], cmd_help), (["start"], cmd_start), (["esg"], cmd_esg), (["join", "nick"], cmd_join), (["add"], cmd_add),
                            (["rename"], cmd_rename), (["edit", "session"], cmd_edit), (["pay"], cmd_pay),
-                           (["undo"], cmd_undo), (["ledger"], cmd_ledger), (["history"], cmd_history), (["export"], cmd_export), (["graph"], cmd_graph),
+                           (["undo"], cmd_undo), (["ledger"], cmd_ledger), (["history"], cmd_history), (["export"], cmd_export), (["graph"], cmd_graph), (["purge"], cmd_purge),
                            (["settle"], cmd_settle)]:
         app.add_handler(CommandHandler(names, handler))
     app.add_handler(CallbackQueryHandler(on_draft_button, pattern=r"^d:"))
     app.add_handler(CallbackQueryHandler(on_history_page, pattern=r"^h:"))
     app.add_handler(CallbackQueryHandler(on_graph_button, pattern=r"^g:"))
+    app.add_handler(CallbackQueryHandler(on_purge_button, pattern=r"^x:"))
     app.add_handler(CallbackQueryHandler(on_esg_button, pattern=r"^e:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_private_text))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & filters.UpdateType.MESSAGE, on_group_text))
@@ -1034,8 +1128,11 @@ def main() -> None:
     token = os.environ.get("BOT_TOKEN")
     if not token:
         sys.exit("BOT_TOKEN is not set. Put it in .env (see README.md).")
-    build_app(token, os.environ.get("LEDGER_DB", os.path.join(here, "ledger.db")),
-              os.environ.get("ESG_DB_PATH")).run_polling()
+    owner = os.environ.get("OWNER_USER_ID", "")
+    if not owner.isdigit():
+        log.warning("OWNER_USER_ID is not set, so /purge is switched off")
+    build_app(token, os.environ.get("LEDGER_DB", os.path.join(here, "ledger.db")), os.environ.get("ESG_DB_PATH"),
+              int(owner) if owner.isdigit() else None).run_polling()
 
 
 if __name__ == "__main__":

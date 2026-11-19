@@ -12,3 +12,6 @@ ledger.db
 __pycache__/
 .pytest_cache/
 .DS_Store
+
+# database backups taken before a /purge
+backups/

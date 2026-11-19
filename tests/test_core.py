@@ -204,3 +204,80 @@ def test_an_undone_session_vanishes_from_profit_and_undoing_the_undo_restores_it
     store.undo(CHAT, redo.seq, 1, "Alice")  # and undone once more
     assert [e.deltas for e in store.profit_events(CHAT)] == [{a: 300, b: -300}]
     assert keep.seq == 1
+
+
+def seeded_ledger(store):
+    a, b, c = store.ids["Alice"], store.ids["Bob"], store.ids["Carol"]
+    one = store.add_entry(CHAT, "session", {a: 5000, b: -5000}, 1, "Alice")
+    two = store.add_entry(CHAT, "session", {a: 700, c: -700}, 1, "Alice")
+    undo = store.undo(CHAT, two.seq, 1, "Alice")
+    three = store.add_entry(CHAT, "session", {b: 1200, c: -1200}, 1, "Alice")
+    return a, b, c, one, two, undo, three
+
+
+def test_purge_deletes_entries_keeps_the_ledger_balanced_and_restores_the_guards(store):
+    a, b, c, one, two, undo, three = seeded_ledger(store)
+    before = store.balances(CHAT)
+    plan = store.purge(CHAT, [one.seq])
+    assert [e.seq for e in plan.entries] == [1] and plan.effect == {a: -5000, b: 5000}
+    assert store.entry(CHAT, 1) is None and store.count(CHAT) == 3
+    assert store.balances(CHAT) == {a: before[a] - 5000, b: before[b] + 5000, c: before[c]} and sum(store.balances(CHAT).values()) == 0
+    assert store.db.execute("SELECT COUNT(*) FROM entry_lines WHERE entry_id = ?", (one.id,)).fetchone()[0] == 0  # no orphans
+    assert store.add_entry(CHAT, "session", {a: 100, b: -100}, 1, "Alice").seq == 5  # numbers are never reused
+    for sql in ("DELETE FROM entries", "UPDATE entry_lines SET cents = 1"):  # append-only again
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            store.db.execute(sql)
+
+
+def test_an_entry_and_the_undo_of_it_are_purged_together(store):
+    a, b, c, one, two, undo, three = seeded_ledger(store)
+    for name in ([two.seq], [undo.seq], [two.seq, undo.seq]):
+        plan = store.purge_plan(CHAT, name)
+        assert [e.seq for e in plan.entries] == [2, 3] and plan.effect == {}  # an entry and its undo cancel out
+    store.purge(CHAT, [undo.seq])
+    assert [e.seq for e in store.entries(CHAT, 10)] == [4, 1] and store.balances(CHAT)[a] == 5000
+
+
+def test_purge_forgets_that_an_esg_flip_was_recorded(store):
+    a, b = store.ids["Alice"], store.ids["Bob"]
+    entry = store.add_esg_entry(CHAT, 134, {a: 100, b: -100}, 7, "ESG Flip Bot", "esgbot")
+    assert store.purge_plan(CHAT, [entry.seq]).esg_flips == [134]
+    store.purge(CHAT, [entry.seq])
+    assert not store.esg_recorded(CHAT, 134) and store.count(CHAT) == 0
+
+
+def test_purge_refuses_unknown_entries_and_silly_amounts_and_changes_nothing(store):
+    seeded_ledger(store)
+    before = store.balances(CHAT)
+    for seqs in ([999], [1, 999], [], list(range(1, 22))):
+        with pytest.raises(LedgerError):
+            store.purge(CHAT, seqs)
+    assert store.count(CHAT) == 4 and store.balances(CHAT) == before
+    with pytest.raises(LedgerError):
+        store.purge(-5, [1])  # another chat's entry numbers are not ours
+
+
+def test_a_purge_that_fails_its_checks_is_rolled_back_completely(store, monkeypatch):
+    a, b, c, one, *_ = seeded_ledger(store)
+    before, real, calls = store.balances(CHAT), store.balances, []
+
+    def corrupt(chat):  # after the delete, claim the books don't balance
+        calls.append(1)
+        return real(chat) if len(calls) == 1 else {**real(chat), a: 1}
+
+    monkeypatch.setattr(store, "balances", corrupt)
+    with pytest.raises(LedgerError, match="failed its checks"):
+        store.purge(CHAT, [one.seq])
+    monkeypatch.undo()
+    assert store.entry(CHAT, 1) is not None and store.count(CHAT) == 4 and store.balances(CHAT) == before
+    with pytest.raises(sqlite3.DatabaseError, match="append-only"):  # and the guards were never left off
+        store.db.execute("DELETE FROM entries")
+
+
+def test_a_backup_is_a_private_complete_copy(store, tmp_path):
+    import os
+    seeded_ledger(store)
+    path = store.backup(str(tmp_path / "bk"))
+    assert os.stat(path).st_mode & 0o777 == 0o600 and os.stat(tmp_path / "bk").st_mode & 0o777 == 0o700
+    copy = Store(path)
+    assert copy.count(CHAT) == 4 and copy.balances(CHAT) == store.balances(CHAT)

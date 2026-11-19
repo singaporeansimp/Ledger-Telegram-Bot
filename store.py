@@ -1,4 +1,6 @@
 """SQLite ledger. Entries are append-only and every entry sums to zero, so the ledger always tallies."""
+import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -59,7 +61,12 @@ CREATE TRIGGER IF NOT EXISTS lines_no_delete BEFORE DELETE ON entry_lines
 BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
 """
 
+# The four statements that make the ledger append-only. purge() lifts and restores exactly these.
+TRIGGER_NAMES = re.findall(r"CREATE TRIGGER IF NOT EXISTS (\w+)", SCHEMA)
+TRIGGER_SQL = re.findall(r"CREATE TRIGGER IF NOT EXISTS \w+ .*?END;", SCHEMA, re.S)
+
 MAX_NAME = 24
+MAX_PURGE = 20
 MAX_NOTE = 60
 
 
@@ -90,6 +97,14 @@ class Entry:
 
 
 @dataclass(frozen=True)
+class Purge:
+    """What removing some entries would do: every entry that goes (an entry and the undo of it go together)."""
+    entries: list[Entry]
+    effect: dict[int, int]  # member_id -> change to their balance, cents (empty if balances stay as they are)
+    esg_flips: list[int]  # ESG flip numbers that would no longer count as recorded
+
+
+@dataclass(frozen=True)
 class ProfitEvent:
     seq: int  # the ledger entry number (#81), so a chart can be matched up with /history
     at: datetime
@@ -114,6 +129,7 @@ def clean_note(raw: str) -> str | None:
 
 class Store:
     def __init__(self, path: str):
+        self.path = path
         self.db = sqlite3.connect(path, isolation_level=None)  # autocommit; transactions are explicit
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
@@ -310,6 +326,73 @@ class Store:
             lines.setdefault(entry_id, {})[member_id] = cents
         return [ProfitEvent(row["seq"], datetime.fromisoformat(row["created_at"]), lines[row["id"]])
                 for row in entries if kinds[row["id"]] == "session" and stands(row["id"])]
+
+    def purge_plan(self, chat: int, seqs: list[int]) -> Purge:
+        """What purge(seqs) would remove. An entry and the undo of it can't be separated, so both go."""
+        found: dict[int, Entry] = {}
+        todo = list(seqs)
+        while todo:
+            seq = todo.pop()
+            if seq in found:
+                continue
+            entry = self.entry(chat, seq)
+            if entry is None:
+                raise LedgerError(f"There is no entry #{seq}.")
+            found[seq] = entry
+            todo += [n for n in (entry.reverses, entry.reversed_by) if n]
+        entries = [found[n] for n in sorted(found)]
+        effect: dict[int, int] = {}
+        for entry in entries:
+            for member_id, cents in entry.lines.items():
+                effect[member_id] = effect.get(member_id, 0) - cents
+        marks = ",".join("?" * len(entries))
+        flips = [r[0] for r in self.db.execute(
+            f"SELECT flip_number FROM esg_flips WHERE chat_id = ? AND entry_id IN ({marks}) ORDER BY 1",
+            (chat, *(e.id for e in entries)))]
+        return Purge(entries, {m: c for m, c in effect.items() if c}, flips)
+
+    def backup(self, directory: str | None = None) -> str:
+        """A consistent copy of the whole database (readable only by its owner); returns where it went."""
+        directory = directory or os.path.join(os.path.dirname(os.path.abspath(self.path)), "backups")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        dest = os.path.join(directory, f"ledger-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-before-purge.db")
+        copy = sqlite3.connect(dest)
+        try:
+            self.db.backup(copy)
+        finally:
+            copy.close()
+        os.chmod(dest, 0o600)
+        return dest
+
+    def purge(self, chat: int, seqs: list[int]) -> Purge:
+        """Permanently delete entries (and the undos tied to them). The one way past the append-only rule.
+
+        All or nothing: the guards are lifted and put back inside one transaction, which is rolled back unless the
+        ledger still sums to zero, every balance changed by exactly what the plan said, nothing dangles, and all
+        four guards are back. Take a backup() first; this cannot be undone.
+        """
+        if not 1 <= len(seqs) <= MAX_PURGE:
+            raise LedgerError(f"Purge between 1 and {MAX_PURGE} entries at a time.")
+        with self._tx():
+            plan = self.purge_plan(chat, seqs)
+            before = self.balances(chat)
+            marks = ",".join("?" * len(plan.entries))
+            ids = [e.id for e in plan.entries]
+            for name in TRIGGER_NAMES:
+                self.db.execute(f"DROP TRIGGER {name}")
+            self.db.execute(f"DELETE FROM esg_flips WHERE entry_id IN ({marks})", ids)
+            self.db.execute(f"DELETE FROM entry_lines WHERE entry_id IN ({marks})", ids)
+            self.db.execute(f"DELETE FROM entries WHERE id IN ({marks})", ids)
+            for statement in TRIGGER_SQL:
+                self.db.execute(statement)
+            after = self.balances(chat)
+            sound = (sum(after.values()) == 0
+                     and after == {m: before[m] + plan.effect.get(m, 0) for m in before}
+                     and not self.db.execute("PRAGMA foreign_key_check").fetchall()
+                     and self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'").fetchone()[0] == len(TRIGGER_NAMES))
+            if not sound:
+                raise LedgerError("The ledger failed its checks after the purge, so nothing was changed.")
+        return plan
 
     def undoable(self, chat: int, limit: int) -> list[Entry]:
         return self._entries("AND r.id IS NULL", (chat,), limit)

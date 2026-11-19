@@ -1,5 +1,7 @@
 # Group ledger bot
 
+[![tests](https://github.com/singaporeansimp/Ledger-Telegram-Bot/actions/workflows/tests.yml/badge.svg)](https://github.com/singaporeansimp/Ledger-Telegram-Bot/actions/workflows/tests.yml)
+
 Zero-sum SGD ledger for a Telegram group. Every entry sums to zero, entries are append-only
 (undo adds a reversing entry), and the ledger is pinned as a picture (a card with a bar per player) that is
 replaced in place after every change. If a picture can't be drawn (no fonts), it falls back to a text table.
@@ -40,6 +42,15 @@ disappears from the history as if it never happened.
 
 Drafts (an edit in progress) live in memory only: a restart discards them, and nothing is
 ever recorded until someone taps Confirm. Each person has one edit open at a time; starting another replaces it.
+
+## Owner-only: /purge
+`/purge 81 82` permanently deletes entries from the ledger, for cleaning up test or joke entries. It is the one
+way past the append-only rule, so it is locked down: only the Telegram **user id** in `OWNER_USER_ID` (in `.env`; a
+number, not a username, since usernames can be changed or reclaimed) can use it, and everyone else is ignored without
+a reply. It is not in `/help` or the command menu. The bot shows exactly what would go and how balances would change,
+and nothing is deleted until the owner taps Delete. An entry and the undo of it are always deleted together. A copy of
+the database is saved to `backups/` first, and the deletion is a single all-or-nothing step that is rolled back unless
+the ledger still sums to zero and the append-only guards are back. Without `OWNER_USER_ID`, `/purge` is off.
 
 ## ESG Flip bot results
 The ledger can add the ESG Flip bot's flip results by itself. In the group, a group

@@ -168,13 +168,14 @@ def esg_message(number, players):
 
 
 class Chat:
-    def __init__(self, monkeypatch, tmp_path, esg_db=True):
+    def __init__(self, monkeypatch, tmp_path, esg_db=True, owner_id=ALICE["id"]):
         self.tg = FakeTelegram()
         monkeypatch.setattr(HTTPXRequest, "do_request", lambda s, *a, **k: self.tg.do_request(*a, **k))
         self.esg_path = str(tmp_path / "esg.sqlite3")
         with sqlite3.connect(self.esg_path) as esg_db_file:
             esg_db_file.executescript(ESG_SCHEMA)
-        self.app = ledger_bot.build_app("123:ABC", str(tmp_path / "ledger.db"), self.esg_path if esg_db else None)
+        self.app = ledger_bot.build_app("123:ABC", str(tmp_path / "ledger.db"), self.esg_path if esg_db else None, owner_id)
+        self.backups = tmp_path / "backups"
         self.store = self.app.bot_data["store"]
         self.counter = 0
 
@@ -1104,5 +1105,111 @@ def test_graph_buttons_change_window_and_axis_and_remember_the_other_choices(mon
             assert {"• 10d", "24h", "7d", "30d", "All"} <= set(tg.buttons(custom))
             await c.tap(CAROL, custom, "g:0")  # a button from before windows existed still works
             assert tg.messages[custom]["photo"] == render()
+
+    run(scenario())
+
+
+def seeded(c):
+    """Three players and four entries: #1 and #2 sessions, #3 undoes #2, #4 another session."""
+    alice, bobby, caz = (c.store.find(CHAT, name=n).id for n in ("Alice", "Bobby", "Caz"))
+    c.store.add_entry(CHAT, "session", {alice: 5000, bobby: -5000}, 1, "Alice")
+    two = c.store.add_entry(CHAT, "session", {alice: 700, caz: -700}, 1, "Alice")
+    c.store.undo(CHAT, two.seq, 1, "Alice")
+    c.store.add_entry(CHAT, "session", {bobby: 1200, caz: -1200}, 1, "Alice")
+    return alice, bobby, caz
+
+
+def test_purge_ignores_everyone_but_the_owner_without_a_word(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:  # the owner is Alice, by Telegram id
+            tg = c.tg
+            await join_everyone(c)
+            seeded(c)
+            before = len(tg.live(CHAT))
+            await c.say(BOB, "/purge 1")  # a group member
+            await c.say({**BOB, "username": "alice"}, "/purge 1")  # the owner's @username, but a different account
+            await c.say({"id": 1087968824, "is_bot": True, "first_name": "Group", "username": "GroupAnonymousBot"}, "/purge 1")
+            assert len(tg.live(CHAT)) == before and c.store.count(CHAT) == 4  # no reply, nothing deleted
+            await c.say(ALICE, "/purge 1")
+            assert len(tg.live(CHAT)) == before + 1  # the real owner gets the preview
+
+        (tmp_path / "other").mkdir()
+        async with Chat(monkeypatch, tmp_path / "other", owner_id=None) as c:
+            await join_everyone(c)
+            seeded(c)
+            n = len(c.tg.live(CHAT))
+            await c.say(ALICE, "/purge 1")  # nobody is the owner, so it is switched off for everyone
+            assert len(c.tg.live(CHAT)) == n
+
+    run(scenario())
+
+
+def test_purge_shows_a_preview_and_only_the_owner_can_confirm_it(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:
+            tg = c.tg
+            await join_everyone(c)
+            alice, bobby, caz = seeded(c)
+            await c.say(ALICE, "/purge 1")
+            ask = c.last_in(CHAT)
+            preview = tg.text(ask)
+            assert "Permanently delete 1 entry" in preview and "#1 Session" in preview
+            assert "Alice -50.00" in preview and "Bobby +50.00" in preview  # what removing it does to balances
+            assert set(tg.buttons(ask)) == {"🗑 Delete", "✖ Cancel"}
+            await c.tap(BOB, ask, tg.buttons(ask)["🗑 Delete"])  # not the owner
+            assert "Only the owner" in tg.alerts[-1] and c.store.count(CHAT) == 4
+            await c.tap(ALICE, ask, tg.buttons(ask)["✖ Cancel"])
+            assert "cancelled" in tg.text(ask) and c.store.count(CHAT) == 4 and not tg.buttons(ask)
+            await c.tap(ALICE, ask, "x:abcdef:ok")  # a button that no longer exists
+            assert "expired" in tg.alerts[-1] and c.store.count(CHAT) == 4
+
+    run(scenario())
+
+
+def test_the_owner_confirming_deletes_backs_up_and_refreshes_the_ledger(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:
+            tg = c.tg
+            await join_everyone(c)
+            alice, bobby, caz = seeded(c)
+            before = c.balances()
+            await c.say(ALICE, "/purge #1")
+            ask = c.last_in(CHAT)
+            await c.tap(ALICE, ask, tg.buttons(ask)["🗑 Delete"])
+            assert c.store.entry(CHAT, 1) is None and c.store.count(CHAT) == 3
+            assert "Deleted #1" in tg.text(ask) and not tg.buttons(ask)
+            assert c.balances() == {"Alice": before["Alice"] - 5000, "Bobby": before["Bobby"] + 5000, "Caz": before["Caz"]}
+            assert sum(c.store.balances(CHAT).values()) == 0
+            assert tg.messages[c.store.pinned_message(CHAT)]["photo"] == c.card()  # the pinned ledger follows the change
+            kept = list(c.backups.glob("ledger-*-before-purge.db"))
+            assert len(kept) == 1 and (kept[0].stat().st_mode & 0o777) == 0o600
+            with sqlite3.connect(kept[0]) as old:  # the backup still has what was deleted
+                assert old.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 4
+            assert c.store.add_entry(CHAT, "session", {alice: 100, bobby: -100}, 1, "Alice").seq == 5  # numbering carries on
+            await c.tap(ALICE, ask, "x:abcdef:ok")
+            assert "expired" in tg.alerts[-1]  # and it can't be confirmed twice
+
+    run(scenario())
+
+
+def test_purge_takes_an_entry_and_its_undo_together_and_rejects_bad_input(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:
+            tg = c.tg
+            reply = lambda: tg.text(c.last_in(CHAT))  # noqa: E731
+            await join_everyone(c)
+            seeded(c)
+            await c.say(ALICE, "/purge 2")  # #3 undoes #2, so it must go as well
+            ask = c.last_in(CHAT)
+            assert "Permanently delete 2 entries" in tg.text(ask) and "#3 Undo of #2" in tg.text(ask)
+            assert "Change to balances: none" in tg.text(ask) and "undo behind" in tg.text(ask)
+            await c.tap(ALICE, ask, tg.buttons(ask)["🗑 Delete"])
+            assert [e.seq for e in c.store.entries(CHAT, 10)] == [4, 1] and c.balances() == {"Alice": 5000, "Bobby": -3800, "Caz": -1200}
+
+            for text, expected in [("/purge", "Usage"), ("/purge abc", "Usage"), ("/purge 1.5", "Usage"), ("/purge 999", "no entry #999"),
+                                   ("/purge " + " ".join(map(str, range(1, 25))), "Usage")]:
+                await c.say(ALICE, text)
+                assert expected in reply(), text
+            assert c.store.count(CHAT) == 2
 
     run(scenario())
