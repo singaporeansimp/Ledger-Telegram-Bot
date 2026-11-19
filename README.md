@@ -30,6 +30,14 @@ full backup.
 `/edit` record a session (optional note on the review screen) · `/pay` record a payout · `/undo` · `/history` · `/export` · `/settle` · `/ledger`
 `/add @friend [name]` · `/rename @friend = New name` · `/join [name]`
 
+`/graph` draws profit as a picture: one stepped line per player, or one player (shaded green while ahead, red while
+behind). Options go in any order: a player (`Jared`, `me`, `@friend`), how far back (`24h`, `7d`, `2w`, `1m`, or `all`),
+and the horizontal axis: time (default) or `entries`, which spaces the sessions evenly and labels them with their entry
+numbers (`#81`), so it lines up with `/history`. For example `/graph me 7d entries`. Buttons on the picture change the
+player, window and axis in place, keeping the other choices. A window shows the profit made *within* it, starting from
+zero. Profit counts sessions only: payouts settle a balance without being winnings, and a session that was undone
+disappears from the history as if it never happened.
+
 Drafts (an edit in progress) live in memory only: a restart discards them, and nothing is
 ever recorded until someone taps Confirm. Each person has one edit open at a time; starting another replaces it.
 

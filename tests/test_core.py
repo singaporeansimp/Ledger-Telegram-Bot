@@ -8,7 +8,7 @@ import re
 
 from money import format_cents, parse_cents, settle
 import render
-from store import LedgerError, Store
+from store import LedgerError, ProfitEvent, Store
 
 CHAT = -100
 
@@ -174,3 +174,33 @@ def test_a_database_from_before_pin_tracking_is_migrated_in_place(tmp_path):
     s.set_pinned_message(-5, 456)  # a new ledger message isn't pinned until its pin succeeds
     assert s.pinned_message(-5) == 456 and s.pin_ok(-5) is False
     Store(path)  # opening again is a no-op, not an error
+
+
+def test_profit_events_are_sessions_only_so_payouts_dont_erase_winnings(store):
+    a, b = store.ids["Alice"], store.ids["Bob"]
+    store.add_entry(CHAT, "session", {a: 5000, b: -5000}, 1, "Alice")
+    store.add_entry(CHAT, "payment", {b: 5000, a: -5000}, 1, "Alice")  # Bob pays Alice back: balances reset, profit doesn't
+    store.add_entry(CHAT, "session", {a: -1000, b: 1000}, 1, "Alice")
+    events = store.profit_events(CHAT)
+    assert [e.deltas for e in events] == [{a: 5000, b: -5000}, {a: -1000, b: 1000}]
+    assert [e.seq for e in events] == [1, 3]  # entry numbers, so the payout (#2) leaves a gap
+    assert all(isinstance(e, ProfitEvent) and e.at.tzinfo for e in events)
+    assert events[0].at <= events[1].at
+    assert store.profit_events(-999) == []  # another chat's results are not ours
+
+
+def test_an_undone_session_vanishes_from_profit_and_undoing_the_undo_restores_it(store):
+    a, b = store.ids["Alice"], store.ids["Bob"]
+    keep = store.add_entry(CHAT, "session", {a: 300, b: -300}, 1, "Alice")
+    session = store.add_entry(CHAT, "session", {a: 700, b: -700}, 1, "Alice")
+    payout = store.add_entry(CHAT, "payment", {b: 300, a: -300}, 1, "Alice")
+    store.undo(CHAT, payout.seq, 1, "Alice")  # a payout reversed: not profit either way
+    assert [e.deltas for e in store.profit_events(CHAT)] == [{a: 300, b: -300}, {a: 700, b: -700}]
+    undo = store.undo(CHAT, session.seq, 1, "Alice")
+    assert [e.deltas for e in store.profit_events(CHAT)] == [{a: 300, b: -300}]  # as if it never happened
+    redo = store.undo(CHAT, undo.seq, 1, "Alice")  # undoing the undo: the session stands again, at its own time
+    events = store.profit_events(CHAT)
+    assert [e.deltas for e in events] == [{a: 300, b: -300}, {a: 700, b: -700}] and events[0].at <= events[1].at
+    store.undo(CHAT, redo.seq, 1, "Alice")  # and undone once more
+    assert [e.deltas for e in store.profit_events(CHAT)] == [{a: 300, b: -300}]
+    assert keep.seq == 1

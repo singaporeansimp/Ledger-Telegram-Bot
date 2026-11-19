@@ -5,7 +5,7 @@ import re
 import secrets
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape
 
 from telegram import (BotCommand, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto,
@@ -17,6 +17,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
 
 import esg
 import ledger_image
+import profit_chart
 import render
 from money import format_cents as fmt
 from money import parse_cents
@@ -43,6 +44,7 @@ Edits, payouts and undos continue in a private chat with me, so the group stays 
 
 <b>Records</b>
 /history – every entry, who made it and when
+/graph [name] [7d] [entries] – profit over time or by entry, for everyone or one player (try /graph me 7d)
 /settle – who should pay whom to clear everyone
 /esg @bot – add the ESG Flip bot's results to the ledger automatically
 /export – the full history as a CSV file
@@ -57,6 +59,7 @@ COMMANDS = [BotCommand(c, d) for c, d in [
     ("pay", "Record a payout"),
     ("undo", "Undo an entry"),
     ("history", "See every entry"),
+    ("graph", "Profit over time chart"),
     ("settle", "Who should pay whom"),
     ("esg", "Follow the ESG Flip bot"),
     ("export", "Download history as CSV"),
@@ -573,6 +576,121 @@ async def cmd_export(update, context):
         filename=f"ledger-history-{stamp}.csv", caption=f"{len(entries)} entries, oldest first.")
 
 
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@dataclass
+class GraphRequest:
+    player: str  # what is left once the options are taken out: a name, "me", or nothing for everyone
+    window: profit_chart.Window | None
+    by_entries: bool
+
+
+def parse_graph_args(text: str) -> GraphRequest | str:
+    """Options in any order: a window (24h, 7d, 2w, 1m, all), entries or time, and the player. An error message if not understood."""
+    window, by_entries, name = None, False, []
+    for word in text.split():
+        low = word.lower()
+        if low == "all":
+            window = None
+        elif low in ("entries", "sessions"):
+            by_entries = True
+        elif low == "time":
+            by_entries = False
+        elif found := profit_chart.Window.parse(word):
+            window = found
+        elif re.fullmatch(r"\d+[a-z]+", low):  # looks like a window but isn't a valid one
+            return f"I didn't understand “{word}”. For how far back, try 24h, 7d, 2w, 1m or all."
+        else:
+            name.append(word)
+    return GraphRequest(" ".join(name), window, by_entries)
+
+
+@dataclass
+class GraphView:
+    png: bytes | None
+    caption: str
+    keyboard: InlineKeyboardMarkup | None
+    problem: str  # why there is no picture, when there isn't
+
+
+WINDOW_BUTTONS = ("24h", "7d", "30d", "all")
+
+
+def graph_view(s: Store, chat: int, only: int | None, window: profit_chart.Window | None, by_entries: bool) -> GraphView:
+    """The profit chart for everyone (only=None) or one player, its caption, and buttons for anyone else, another window
+    or the other kind of axis. Each button carries the current choices, so changing one keeps the rest."""
+    names = {m.id: m.name for m in s.members(chat)}
+    now, events = utcnow(), s.profit_events(chat)
+    shown = profit_chart.within(events, now, window)
+    png = profit_chart.render_profit(events, names, only, now, window, by_entries)
+    if png is None:
+        who = f"{names[only]} hasn't" if only in names else "No one has"
+        problem = ("No sessions have been recorded yet, so there's nothing to graph." if not events else
+                   f"No sessions in the {window.label}." if not shown else f"{who} played in a recorded session"
+                   + (f" in the {window.label}." if window else " yet."))
+        return GraphView(None, "", None, problem)
+
+    def data(who: int | None, w: str, mode: bool) -> str:
+        return f"g:{who or 0}:{w}:{'e' if mode else 't'}"
+
+    now_w = window.token if window else "all"
+    played = [m for m in sorted(names, key=lambda i: names[i].lower()) if any(e.deltas.get(m) for e in shown)]
+    buttons = [button(("• " if m == only else "") + names[m], data(m, now_w, by_entries)) for m in played]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    if only is not None:
+        rows.append([button("👥 Everyone", data(None, now_w, by_entries))])
+    tokens = [now_w] + [t for t in WINDOW_BUTTONS if t != now_w] if now_w not in WINDOW_BUTTONS else list(WINDOW_BUTTONS)
+    rows.append([button(("• " if t == now_w else "") + ("All" if t == "all" else t), data(only, t, by_entries))
+                 for t in sorted(tokens, key=lambda t: (t == "all", profit_chart.Window.parse(t).delta if t != "all" else 0))])
+    rows.append([button(("• " if not by_entries else "") + "⏱ By time", data(only, now_w, False)),
+                 button(("• " if by_entries else "") + "🔢 By entries", data(only, now_w, True))])
+    what = "profit by entry" if by_entries else "profit over time"
+    caption = f"📈 {'Everyone' if only is None else escape(names[only])} · {what}" + (f" · {window.label}" if window else "")
+    return GraphView(png, caption, InlineKeyboardMarkup(rows), "")
+
+
+async def cmd_graph(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/graph [name | @mention | me] [24h | 7d | 2w | 1m | all] [entries | time]: profit over time, or by entry."""
+    msg, chat, s = update.effective_message, update.effective_chat.id, store_of(context)
+    mention, text = mention_of(msg), args_of(msg)
+    req = parse_graph_args(text.replace(mention.token, "", 1) if mention else text)
+    if isinstance(req, str):
+        await msg.reply_text(req)
+        return
+    only = None
+    if mention or req.player:
+        player = find_player(s, chat, update.effective_user, req.player, mention)
+        if player is None:
+            await msg.reply_text("I don't know that player. Check /ledger, or try /graph me.")
+            return
+        only = player.id
+    view = graph_view(s, chat, only, req.window, req.by_entries)
+    if view.png is None:
+        await msg.reply_text(view.problem)
+        return
+    await msg.reply_photo(view.png, caption=view.caption, parse_mode=HTML, reply_markup=view.keyboard)
+
+
+async def on_graph_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Swap the chart in place for another player, window or axis; it is rebuilt from the ledger as it is now."""
+    query = update.callback_query
+    _, who, *rest = query.data.split(":")  # older buttons had only the player
+    window = profit_chart.Window.parse(rest[0]) if rest else None
+    view = graph_view(store_of(context), query.message.chat_id, int(who) or None, window, rest[1:] == ["e"])
+    if view.png is None:
+        await query.answer(view.problem, show_alert=True)
+        return
+    try:
+        await query.edit_message_media(InputMediaPhoto(view.png, caption=view.caption, parse_mode=HTML),
+                                       reply_markup=view.keyboard)
+    except BadRequest as err:
+        if "not modified" not in str(err).lower():
+            raise
+    await query.answer()
+
+
 async def cmd_settle(update, context):
     s, chat = store_of(context), update.effective_chat.id
     names = {m.id: m.name for m in s.members(chat)}
@@ -606,6 +724,16 @@ def mention_of(msg) -> Mention | None:
 def args_of(msg) -> str:
     parts = msg.text.split(None, 1)
     return parts[1].strip() if len(parts) > 1 else ""
+
+
+def find_player(s: Store, chat: int, me, text: str, mention: Mention | None):
+    """The ledger player a command argument names: an @mention, a name, or "me" for the sender (if `me` is given)."""
+    if mention:
+        return s.find(chat, user_id=mention.user_id, username=mention.username)
+    text = " ".join(text.split())
+    if me is not None and text.lower() == "me":
+        return s.identify(chat, me.id, me.username)
+    return s.find(chat, name=text)
 
 
 async def cmd_join(update, context):
@@ -655,8 +783,7 @@ async def cmd_rename(update, context):
         await msg.reply_text("Usage: /rename @friend = New name  or  /rename Old name = New name")
         return
     who, new = text.split("=", 1)
-    member = (s.find(chat, user_id=mention.user_id, username=mention.username) if mention
-              else s.find(chat, name=" ".join(who.split())))
+    member = find_player(s, chat, None, who, mention)
     if member is None:
         await msg.reply_text("I don't know that player. Check /ledger, or /add them first.")
         return
@@ -887,11 +1014,12 @@ def build_app(token: str, db_path: str, esg_db_path: str | None = None) -> Appli
     app.bot_data["esg_db"] = esg_db_path
     for names, handler in [(["help"], cmd_help), (["start"], cmd_start), (["esg"], cmd_esg), (["join", "nick"], cmd_join), (["add"], cmd_add),
                            (["rename"], cmd_rename), (["edit", "session"], cmd_edit), (["pay"], cmd_pay),
-                           (["undo"], cmd_undo), (["ledger"], cmd_ledger), (["history"], cmd_history), (["export"], cmd_export),
+                           (["undo"], cmd_undo), (["ledger"], cmd_ledger), (["history"], cmd_history), (["export"], cmd_export), (["graph"], cmd_graph),
                            (["settle"], cmd_settle)]:
         app.add_handler(CommandHandler(names, handler))
     app.add_handler(CallbackQueryHandler(on_draft_button, pattern=r"^d:"))
     app.add_handler(CallbackQueryHandler(on_history_page, pattern=r"^h:"))
+    app.add_handler(CallbackQueryHandler(on_graph_button, pattern=r"^g:"))
     app.add_handler(CallbackQueryHandler(on_esg_button, pattern=r"^e:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_private_text))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & filters.UpdateType.MESSAGE, on_group_text))

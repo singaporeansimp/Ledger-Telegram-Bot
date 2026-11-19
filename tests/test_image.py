@@ -2,6 +2,7 @@ import io
 
 from PIL import Image
 
+import card
 import ledger_image as li
 
 ROWS = [("Alice", 8000), ("Bobby", -3050), ("Caz", -4950)]
@@ -34,15 +35,15 @@ def test_each_player_gets_a_distinct_picture_of_their_balance():
 
 
 def test_chinese_names_are_drawn_not_replaced_by_missing_glyph_boxes():
-    latin = li._chain(False, 40)[0]
-    assert not li._has_glyph(latin, "王") and any(li._has_glyph(f, "王") for f in li._chain(False, 40))
+    latin = card.chain(False, 40)[0]
+    assert not card.has_glyph(latin, "王") and any(card.has_glyph(f, "王") for f in card.chain(False, 40))
     assert li.render_ledger([("王小明", 1000), ("李", -1000)]) != li.render_ledger([("?", 1000), ("?", -1000)])
 
 
 def test_emoji_and_very_long_names_do_not_break_the_card():
-    chain = li._chain(False, 40)
-    assert li._fit("Bobby 🎲 Gambler", chain, 10_000) == "Bobby Gambler"  # unsupported characters dropped, gaps tidied
-    assert li._fit("🎲", chain, 10_000) == "?"
-    fitted = li._fit("x" * 200, chain, 300)
-    assert li._width(fitted, chain) <= 300 and fitted.endswith("…")
+    chain = card.chain(False, 40)
+    assert card.fit("Bobby 🎲 Gambler", chain, 10_000) == "Bobby Gambler"  # unsupported characters dropped, gaps tidied
+    assert card.fit("🎲", chain, 10_000) == "?"
+    fitted = card.fit("x" * 200, chain, 300)
+    assert card.width(fitted, chain) <= 300 and fitted.endswith("…")
     assert li.render_ledger([("🎲", 100), ("y" * 24, -100)])

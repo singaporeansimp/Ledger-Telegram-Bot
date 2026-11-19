@@ -89,6 +89,13 @@ class Entry:
     lines: dict[int, int] = field(default_factory=dict)  # member_id -> cents
 
 
+@dataclass(frozen=True)
+class ProfitEvent:
+    seq: int  # the ledger entry number (#81), so a chart can be matched up with /history
+    at: datetime
+    deltas: dict[int, int]  # member_id -> cents won (+) or lost (-)
+
+
 def clean_name(raw: str) -> str:
     name = " ".join(raw.split())
     if not name:
@@ -280,6 +287,29 @@ class Store:
     def entry(self, chat: int, seq: int) -> Entry | None:
         found = self._entries("AND e.seq = ?", (chat, seq), 1)
         return found[0] if found else None
+
+    def profit_events(self, chat: int) -> list[ProfitEvent]:
+        """Each session that still stands, as its result per player, oldest first: the raw material for profit over time.
+
+        A session someone undid is left out altogether (at the time it was recorded, not just from the undo onwards),
+        so a curve never shows a result that was taken back. Undoing the undo brings it back where it was.
+        Payouts settle a balance rather than win or lose anything, so they never appear.
+        """
+        entries = self.db.execute(
+            "SELECT id, seq, kind, reverses, created_at FROM entries WHERE chat_id = ? ORDER BY seq", (chat,)).fetchall()
+        undone_by = {row["reverses"]: row["id"] for row in entries if row["reverses"]}
+        kinds = {row["id"]: row["kind"] for row in entries}
+
+        def stands(entry_id: int) -> bool:  # standing unless a standing entry reversed it
+            return entry_id not in undone_by or not stands(undone_by[entry_id])
+
+        lines: dict[int, dict[int, int]] = {}
+        for entry_id, member_id, cents in self.db.execute(
+                "SELECT l.entry_id, l.member_id, l.cents FROM entry_lines l JOIN entries e ON e.id = l.entry_id "
+                "WHERE e.chat_id = ?", (chat,)):
+            lines.setdefault(entry_id, {})[member_id] = cents
+        return [ProfitEvent(row["seq"], datetime.fromisoformat(row["created_at"]), lines[row["id"]])
+                for row in entries if kinds[row["id"]] == "session" and stands(row["id"])]
 
     def undoable(self, chat: int, limit: int) -> list[Entry]:
         return self._entries("AND r.id IS NULL", (chat,), limit)

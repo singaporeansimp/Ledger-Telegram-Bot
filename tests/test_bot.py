@@ -5,6 +5,7 @@ import io
 import json
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from html import unescape
 
@@ -12,7 +13,9 @@ from telegram import Update
 from telegram.request import HTTPXRequest
 
 import bot as ledger_bot
+import store as store_module
 import ledger_image
+import profit_chart
 import render
 
 CHAT = -1001
@@ -74,7 +77,7 @@ class FakeTelegram:
         if name == "sendPhoto":
             mid = self.new_id()
             photo = next(iter(request_data.multipart_data.values()))[1]
-            self.messages[mid] = {"chat": p["chat_id"], "text": p.get("caption", ""), "markup": None,
+            self.messages[mid] = {"chat": p["chat_id"], "text": p.get("caption", ""), "markup": p.get("reply_markup"),
                                   "photo": photo, "deleted": False}
             return ok(self.message(mid, p.get("caption", ""), p["chat_id"]))
         if name == "editMessageMedia":
@@ -84,9 +87,9 @@ class FakeTelegram:
             if "photo" not in m:  # Telegram can't turn a text message into a photo
                 return bad(400, "Bad Request: message can't be edited")
             photo, caption = next(iter(request_data.multipart_data.values()))[1], p["media"].get("caption", "")
-            if (m["photo"], m["text"]) == (photo, caption):
+            if (m["photo"], m["text"], m["markup"]) == (photo, caption, p.get("reply_markup")):
                 return bad(400, "Bad Request: message is not modified")
-            m["photo"], m["text"] = photo, caption
+            m["photo"], m["text"], m["markup"] = photo, caption, p.get("reply_markup")
             return ok(self.message(p["message_id"], caption, m["chat"]))
         if name == "editMessageText":
             m = self.messages.get(p["message_id"])
@@ -914,5 +917,192 @@ def test_without_a_readable_esg_database_nothing_is_recorded_by_guessing(monkeyp
             Path(c.app.bot_data["esg_db"]).write_text("not sqlite")
             await c.say(ESGBOT, esg_message(9, players))
             assert "couldn't read ESG's database" in tg.text(c.last_in(CHAT)) and c.store.count(CHAT) == 0
+
+    run(scenario())
+
+
+NOW = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def expected_chart(c, only=None):
+    names = {m.id: m.name for m in c.store.members(CHAT)}
+    return profit_chart.render_profit(c.store.profit_events(CHAT), names, only, NOW)
+
+
+def test_graph_shows_everyone_and_the_buttons_swap_in_one_players_chart(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:
+            tg = c.tg
+            monkeypatch.setattr(ledger_bot, "utcnow", lambda: NOW)
+            await c.say(ALICE, "/graph")
+            assert "nothing to graph" in tg.text(c.last_in(CHAT))  # no ledger, then no sessions
+            await join_everyone(c)  # Alice, Bobby, Caz
+            await c.say(ALICE, "/graph")
+            assert "nothing to graph" in tg.text(c.last_in(CHAT))
+            alice, bobby = (c.store.find(CHAT, name=n).id for n in ("Alice", "Bobby"))
+            c.store.add_entry(CHAT, "session", {alice: 5000, bobby: -5000}, 1, "Alice")
+
+            await c.say(BOB, "/graph")
+            chart = c.last_in(CHAT)
+            assert tg.messages[chart]["photo"] == expected_chart(c) and "Everyone" in tg.text(chart)
+            players = lambda m: {t for t in tg.buttons(m) if t.lstrip("• ") in ("Alice", "Bobby", "Caz")}  # noqa: E731
+            assert players(chart) == {"Alice", "Bobby"}  # only people who have played; Caz hasn't
+
+            await c.tap(CAROL, chart, tg.buttons(chart)["Alice"])  # anyone can flip it
+            assert tg.messages[chart]["photo"] == expected_chart(c, alice) and "Alice · profit over time" in tg.text(chart)
+            assert players(chart) == {"• Alice", "Bobby"} and "👥 Everyone" in tg.buttons(chart)  # the current one is marked
+            await c.tap(BOB, chart, tg.buttons(chart)["Bobby"])
+            assert tg.messages[chart]["photo"] == expected_chart(c, bobby)
+            await c.tap(BOB, chart, tg.buttons(chart)["👥 Everyone"])
+            assert tg.messages[chart]["photo"] == expected_chart(c) and "👥 Everyone" not in tg.buttons(chart)
+            await c.tap(BOB, chart, "g:0")  # already showing everyone: nothing changes, and nothing breaks
+            assert tg.messages[chart]["photo"] == expected_chart(c)
+            await c.tap(BOB, chart, f"g:{c.store.find(CHAT, name='Caz').id}")  # a player with no sessions
+            assert "Caz hasn't played" in tg.alerts[-1] and tg.messages[chart]["photo"] == expected_chart(c)
+
+    run(scenario())
+
+
+def test_graph_names_a_player_by_name_mention_or_me(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:
+            tg = c.tg
+            monkeypatch.setattr(ledger_bot, "utcnow", lambda: NOW)
+            await join_everyone(c)
+            alice, bobby, caz = (c.store.find(CHAT, name=n).id for n in ("Alice", "Bobby", "Caz"))
+            c.store.add_entry(CHAT, "session", {alice: 3000, bobby: -1000, caz: -2000}, 1, "Alice")
+            reply = lambda: c.last_in(CHAT)  # noqa: E731
+
+            await c.say(BOB, "/graph Alice")
+            assert tg.messages[reply()]["photo"] == expected_chart(c, alice)
+            await c.say(BOB, "/graph alice")  # case doesn't matter
+            assert tg.messages[reply()]["photo"] == expected_chart(c, alice)
+            await c.say(BOB, "/graph me")  # Bob is Bobby
+            assert tg.messages[reply()]["photo"] == expected_chart(c, bobby)
+            await c.say(ALICE, "/graph @carol99", entities=[{"type": "mention", "offset": 7, "length": 8}])
+            assert tg.messages[reply()]["photo"] == expected_chart(c, caz)
+            await c.say(BOB, "/graph Nobody")
+            assert "don't know that player" in tg.text(reply())
+            await c.say({"id": 4, "is_bot": False, "first_name": "Dave", "username": "dave"}, "/graph me")
+            assert "don't know that player" in tg.text(reply())  # someone who isn't on the ledger
+            c.store.add_member(CHAT, "Dee")
+            await c.say(BOB, "/graph Dee")
+            assert "hasn't played" in tg.text(reply())
+
+    run(scenario())
+
+
+def test_payouts_are_not_profit_and_taking_a_session_back_removes_it(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:
+            monkeypatch.setattr(ledger_bot, "utcnow", lambda: NOW)
+            await join_everyone(c)
+            alice, bobby = (c.store.find(CHAT, name=n).id for n in ("Alice", "Bobby"))
+            session = c.store.add_entry(CHAT, "session", {alice: 5000, bobby: -5000}, 1, "Alice")
+            before = expected_chart(c, alice)
+            c.store.add_entry(CHAT, "payment", {bobby: 5000, alice: -5000}, 1, "Alice")  # Bobby settles up
+            assert c.balances()["Alice"] == 0  # her balance is back to nothing...
+            assert expected_chart(c, alice) == before  # ...but she still made 50, so the chart still says so
+            c.store.undo(CHAT, session.seq, 1, "Alice")
+            assert c.store.profit_events(CHAT) == []  # the session was taken back: it never happened
+            assert expected_chart(c, alice) is None
+
+    run(scenario())
+
+
+class FakeClock(datetime):
+    """store.datetime with a hand-set now(), so sessions can be recorded at chosen moments."""
+    current = NOW
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.current
+
+
+def record_at(c, when, deltas):
+    FakeClock.current = when
+    return c.store.add_entry(CHAT, "session", deltas, 1, "Alice")
+
+
+def test_graph_takes_a_window_and_an_axis_in_any_order(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:
+            tg = c.tg
+            monkeypatch.setattr(ledger_bot, "utcnow", lambda: NOW)
+            monkeypatch.setattr(store_module, "datetime", FakeClock)
+            await join_everyone(c)
+            alice, bobby, caz = (c.store.find(CHAT, name=n).id for n in ("Alice", "Bobby", "Caz"))
+            record_at(c, NOW - timedelta(days=20), {alice: 5000, bobby: -5000})  # #1: long ago
+            record_at(c, NOW - timedelta(days=3), {bobby: 2000, caz: -2000})  # #2
+            record_at(c, NOW - timedelta(hours=5), {alice: 1000, bobby: -1000})  # #3: Caz isn't in it
+            ev, names = c.store.profit_events(CHAT), {m.id: m.name for m in c.store.members(CHAT)}
+            win = profit_chart.Window.parse
+            sent = lambda: tg.messages[c.last_in(CHAT)]  # noqa: E731
+
+            await c.say(ALICE, "/graph 7d")
+            assert sent()["photo"] == profit_chart.render_profit(ev, names, None, NOW, win("7d")) and "last 7 days" in sent()["text"]
+            await c.say(ALICE, "/graph entries")
+            assert sent()["photo"] == profit_chart.render_profit(ev, names, None, NOW, None, True) and "profit by entry" in sent()["text"]
+            await c.say(ALICE, "/graph me 24h entries")  # in any order
+            assert sent()["photo"] == profit_chart.render_profit(ev, names, alice, NOW, win("24h"), True)
+            await c.say(ALICE, "/graph entries 24H Bobby")
+            assert sent()["photo"] == profit_chart.render_profit(ev, names, bobby, NOW, win("24h"), True)
+            await c.say(ALICE, "/graph sessions all time")  # "all" and "time" undo the other options
+            assert sent()["photo"] == profit_chart.render_profit(ev, names, None, NOW)
+            await c.say(ALICE, "/graph @carol99 4d", entities=[{"type": "mention", "offset": 7, "length": 8}])
+            assert sent()["photo"] == profit_chart.render_profit(ev, names, caz, NOW, win("4d"))
+
+            await c.say(ALICE, "/graph 9x")
+            assert "didn't understand “9x”" in tg.text(c.last_in(CHAT))
+            await c.say(ALICE, "/graph 0d")
+            assert "didn't understand" in tg.text(c.last_in(CHAT))
+            await c.say(ALICE, "/graph 1h")  # nothing in the last hour
+            assert "No sessions in the last hour" in tg.text(c.last_in(CHAT))
+            await c.say(ALICE, "/graph Caz 6h")  # sessions happened in the last six hours, but Caz wasn't in them
+            assert "Caz hasn't played in a recorded session in the last 6 hours" in tg.text(c.last_in(CHAT))
+            await c.say(ALICE, "/graph Nobody 7d")
+            assert "don't know that player" in tg.text(c.last_in(CHAT))
+
+    run(scenario())
+
+
+def test_graph_buttons_change_window_and_axis_and_remember_the_other_choices(monkeypatch, tmp_path):
+    async def scenario():
+        async with Chat(monkeypatch, tmp_path) as c:
+            tg = c.tg
+            monkeypatch.setattr(ledger_bot, "utcnow", lambda: NOW)
+            monkeypatch.setattr(store_module, "datetime", FakeClock)
+            await join_everyone(c)
+            alice, bobby = (c.store.find(CHAT, name=n).id for n in ("Alice", "Bobby"))
+            record_at(c, NOW - timedelta(days=20), {alice: 5000, bobby: -5000})
+            record_at(c, NOW - timedelta(days=2), {alice: -300, bobby: 300})
+            ev, names = c.store.profit_events(CHAT), {m.id: m.name for m in c.store.members(CHAT)}
+            win = profit_chart.Window.parse
+            render = lambda only=None, w=None, e=False: profit_chart.render_profit(ev, names, only, NOW, win(w) if w else None, e)  # noqa: E731
+
+            await c.say(BOB, "/graph")
+            chart = c.last_in(CHAT)
+            assert {"24h", "7d", "30d", "• All", "• ⏱ By time", "🔢 By entries"} <= set(tg.buttons(chart))
+            await c.tap(CAROL, chart, tg.buttons(chart)["7d"])  # a window: only the recent session
+            assert tg.messages[chart]["photo"] == render(w="7d") and "last 7 days" in tg.text(chart)
+            assert {"• 7d", "All"} <= set(tg.buttons(chart))  # the choice is marked
+            await c.tap(CAROL, chart, tg.buttons(chart)["🔢 By entries"])  # the axis, keeping the window
+            assert tg.messages[chart]["photo"] == render(w="7d", e=True) and "profit by entry" in tg.text(chart)
+            await c.tap(CAROL, chart, tg.buttons(chart)["Alice"])  # a player, keeping both
+            assert tg.messages[chart]["photo"] == render(alice, "7d", True) and "Alice · profit by entry · last 7 days" in tg.text(chart)
+            await c.tap(CAROL, chart, tg.buttons(chart)["⏱ By time"])
+            assert tg.messages[chart]["photo"] == render(alice, "7d", False)
+            await c.tap(CAROL, chart, tg.buttons(chart)["All"])  # back to the whole history, still Alice
+            assert tg.messages[chart]["photo"] == render(alice) and "last 7 days" not in tg.text(chart)
+            await c.tap(CAROL, chart, tg.buttons(chart)["👥 Everyone"])
+            assert tg.messages[chart]["photo"] == render()
+
+            await c.tap(CAROL, chart, "g:0:1h:t")  # a window nothing falls in: refused, picture untouched
+            assert "No sessions in the last hour" in tg.alerts[-1] and tg.messages[chart]["photo"] == render()
+            await c.say(ALICE, "/graph 10d")  # a window that isn't a preset appears among the buttons, marked
+            custom = c.last_in(CHAT)
+            assert {"• 10d", "24h", "7d", "30d", "All"} <= set(tg.buttons(custom))
+            await c.tap(CAROL, custom, "g:0")  # a button from before windows existed still works
+            assert tg.messages[custom]["photo"] == render()
 
     run(scenario())
